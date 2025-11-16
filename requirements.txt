@@ -1,0 +1,20 @@
+# Manipulação de documentos
+python-docx>=1.1.0
+PyMuPDF>=1.23.0
+
+# Processamento de texto e web
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+requests>=2.31.0
+python-dateutil>=2.8.2
+
+# CLI e utilidades
+click>=8.1.0
+rich>=13.0.0
+tqdm>=4.66.0
+
+# Expressões regulares avançadas
+regex>=2023.0.0
+
+# Detecção de encoding
+chardet>=5.2.0
