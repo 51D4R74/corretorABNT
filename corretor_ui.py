@@ -310,7 +310,7 @@ class CorretorUI:
             # Auto-preencher saída
             if not self.output_file.get():
                 path = Path(filename)
-                output = path.parent / f"{path.stem}_corrigido.docx"
+                output = path.parent / f"{path.stem}(REV-ABNT).docx"
                 self.output_file.set(str(output))
     
     def _browse_output(self):
@@ -416,9 +416,9 @@ class CorretorUI:
             
             # Criar corretor
             corretor = CorretorABNT(
-                arquivo_entrada=self.input_file.get(),
-                arquivo_saida=self.output_file.get(),
-                verificar_links=self.verify_links.get()
+                input_file=self.input_file.get(),
+                output_file=self.output_file.get(),
+                verify_links=self.verify_links.get()
             )
             
             # Processar com callbacks de log
@@ -428,7 +428,7 @@ class CorretorUI:
             
             self._log("📚 Extraindo referências bibliográficas...", "info")
             corretor.extract_references()
-            self._log(f"✓ {len(corretor.referencias)} referências encontradas", "success")
+            self._log(f"✓ {len(corretor.references)} referências encontradas", "success")
             
             self._log("🔄 Processando citações...", "info")
             corretor.process_citations()
@@ -443,9 +443,17 @@ class CorretorUI:
                 corretor.verify_and_update_links()
                 self._log("✓ Links verificados", "success")
             
+            self._log("🔍 Validando documento corrigido...", "info")
+            corretor.validate_document_after()
+            self._log("✓ Validação concluída", "success")
+            
             self._log("💾 Exportando para Word (DOCX)...", "info")
             corretor.export_docx()
             self._log("✓ Documento Word exportado", "success")
+            
+            self._log("📝 Gerando relatório de alterações...", "info")
+            corretor.generate_final_report()
+            self._log("✓ Relatório gerado", "success")
             
             # Sucesso
             self._log("", "info")
@@ -471,10 +479,21 @@ class CorretorUI:
     
     def _show_success_dialog(self):
         """Mostra diálogo de sucesso com opções"""
+        # Calcular caminho do relatório
+        output_path = Path(self.output_file.get())
+        report_path = output_path.parent / f"{output_path.stem}_RELATORIO.md"
+        
+        # Mensagem com informações sobre os arquivos gerados
+        message = (
+            "Documento processado com sucesso!\n\n"
+            f"📄 Documento corrigido: {output_path.name}\n"
+            f"📝 Relatório de alterações: {report_path.name}\n\n"
+            "Deseja abrir o documento gerado?"
+        )
+        
         result = messagebox.askyesno(
             "Sucesso!",
-            "Documento processado com sucesso!\n\n"
-            "Deseja abrir o arquivo gerado?",
+            message,
             icon=messagebox.QUESTION
         )
         

@@ -48,6 +48,7 @@ class CitationParser:
     def convert_numeric_to_author_date(self) -> str:
         """
         Converte todas as citações numéricas para formato autor-data
+        PRESERVA citações autor-data já existentes
         
         Examples:
             [1] -> (LICHTENSTEIN, 2014)
@@ -58,6 +59,13 @@ class CitationParser:
             Texto com citações convertidas
         """
         content = self.content
+        
+        # Verificar se há citações numéricas para converter
+        has_numeric = bool(re.search(r'\[\d+\]', content))
+        
+        if not has_numeric:
+            # Não há citações numéricas, preservar conteúdo original
+            return content
         
         # Padrão para citações numéricas complexas
         patterns = [

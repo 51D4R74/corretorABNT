@@ -21,6 +21,9 @@ from core.citation_parser import CitationParser
 from core.reference_formatter import ReferenceFormatter
 from core.link_verifier import LinkVerifier
 from core.docx_exporter import DocxExporter
+from core.abnt_validator import ABNTValidator
+from core.report_generator import ReportGenerator, ValidationResults
+from core.link_to_citation import LinkToCitationConverter
 from utils import clean_whitespace, count_words
 
 
@@ -50,9 +53,14 @@ class CorretorABNT:
         self.references = {}
         self.statistics = {}
         
+        # Validação e relatório
+        self.validator_before = None
+        self.validator_after = None
+        self.report = ReportGenerator(str(self.input_file), str(self.output_file))
+        
     def _generate_output_path(self) -> Path:
         """Gera caminho de saída automático"""
-        return self.input_file.parent / f"{self.input_file.stem}_edited.docx"
+        return self.input_file.parent / f"{self.input_file.stem}(REV-ABNT).docx"
     
     def _log(self, message: str, level: str = "INFO"):
         """Log de mensagens se verbose ativado"""
@@ -107,15 +115,24 @@ class CorretorABNT:
         
         # Parsear referências individuais
         references = {}
-        ref_entries = re.split(r'\n\s*\n', ref_text)
+        
+        # Tentar múltiplos padrões de separação
+        # 1. Duas ou mais quebras de linha
+        ref_entries = re.split(r'\n\s*\n+', ref_text)
+        
+        # Se só encontrou uma entrada, tentar separar por padrão de início de referência
+        if len(ref_entries) <= 1:
+            # Separar por linhas que começam com AUTOR/autor em MAIÚSCULAS
+            ref_entries = re.split(r'\n(?=[A-ZÀÁÂÃÉÊÍÓÔÕÚÇ][A-Z]+)', ref_text)
         
         for entry in ref_entries:
             entry = entry.strip()
-            if not entry or len(entry) < 20:
+            if not entry or len(entry) < 15:  # Reduzir mínimo de 20 para 15
                 continue
             
-            # Extrair autor e ano (padrão ABNT)
-            author_year_pattern = r'\*?\*?([A-ZÀÁÂÃÉÊÍÓÔÕÚÇ][A-ZÀ-ÿa-zà-ÿ\s,\.]+?)[\.,]\*?\*?\s*(\d{4})'
+            # Extrair autor e ano (padrão ABNT) - mais flexível
+            # Aceita: AUTOR, ano ou **AUTOR**, ano ou AUTOR. ano
+            author_year_pattern = r'(?:\*\*)?([A-ZÀÁÂÃÉÊÍÓÔÕÚÇ][A-ZÀ-ÿ\s,\.]+?)(?:\*\*)?[\.,]\s*(\d{4}[a-z]?)'
             match = re.search(author_year_pattern, entry)
             
             if match:
@@ -126,11 +143,15 @@ class CorretorABNT:
                 last_name = self._extract_lastname(author)
                 key = f"{last_name.upper()}, {year}"
                 
+                # Limpar marcação de bold mas preservar texto
+                clean_entry = entry.replace('**', '')
+                
                 references[key] = {
                     'full_author': author,
                     'year': year,
                     'last_name': last_name,
-                    'full_entry': entry,
+                    'full_entry': clean_entry,  # Entrada limpa mas original
+                    'original_entry': entry,  # Preservar com formatação
                     'has_url': bool(re.search(r'https?://', entry)),
                     'url': self._extract_url(entry),
                     'access_date': self._extract_access_date(entry)
@@ -163,6 +184,58 @@ class CorretorABNT:
         match = re.search(date_pattern, entry)
         return match.group(1).strip() if match else ""
     
+    def convert_links_to_citations(self) -> None:
+        """
+        ETAPA PRINCIPAL: Converte hyperlinks em citações autor-data
+        e adiciona referências automaticamente
+        
+        Esta é a funcionalidade PRIORITÁRIA que não pode falhar
+        """
+        self._log("="*60, "INFO")
+        self._log("🔗 CONVERSÃO DE LINKS PARA CITAÇÕES (PRIORIDADE MÁXIMA)", "PROCESS")
+        self._log("="*60, "INFO")
+        
+        try:
+            # Criar conversor
+            converter = LinkToCitationConverter(self.markdown_content, self.references)
+            
+            # Executar conversão
+            self.markdown_content, new_references = converter.convert_links_to_citations()
+            
+            # Adicionar novas referências ao dicionário existente
+            if new_references:
+                self.references.update(new_references)
+                self._log(f"✓ {len(new_references)} novas referências adicionadas", "SUCCESS")
+                
+                # Registrar no relatório
+                for citation_key, ref_data in new_references.items():
+                    self.report.add_change(
+                        category='referencia',
+                        before='[Link]',
+                        after=f'({citation_key})',
+                        location=f"URL: {ref_data['url'][:50]}...",
+                        reason='Conversão de link para citação ABNT'
+                    )
+            
+            # Registrar conversões no relatório
+            for conversion in converter.conversions:
+                self.report.add_change(
+                    category='citacao',
+                    before=conversion['url'][:50],
+                    after=conversion['citation'],
+                    location=conversion['context'][:50],
+                    reason='Link convertido para citação autor-data'
+                )
+            
+            self._log("✅ Conversão de links concluída com sucesso", "SUCCESS")
+            
+        except Exception as e:
+            self._log(f"❌ ERRO CRÍTICO na conversão de links: {e}", "ERROR")
+            # NÃO deixar falhar - continuar mesmo com erro
+            import traceback
+            traceback.print_exc()
+            self._log("⚠️ Continuando processamento apesar do erro...", "WARNING")
+    
     def process_citations(self) -> str:
         """
         Processa citações: converte numéricas para autor-data e adiciona faltantes
@@ -175,16 +248,30 @@ class CorretorABNT:
         citation_parser = CitationParser(self.markdown_content, self.references)
         
         # Construir mapeamento de citações numéricas
-        citation_parser.build_numeric_mapping()
+        numeric_map = citation_parser.build_numeric_mapping()
         
         # Converter citações numéricas
+        content_before = self.markdown_content
         self.markdown_content = citation_parser.convert_numeric_to_author_date()
+        
+        # Registrar conversões no relatório
+        if numeric_map:
+            self.report.validation_results.citations_numeric = len(numeric_map)
+            for num, citation in list(numeric_map.items())[:5]:  # Primeiras 5
+                self.report.add_change(
+                    category='citacao',
+                    action='convertido',
+                    before=f'[{num}]',
+                    after=f'({citation})',
+                    location='Texto principal'
+                )
         
         # Adicionar citações faltantes
         missing = citation_parser.find_missing_citations()
         if missing:
             self._log(f"Encontrados {len(missing)} termos sem citação", "WARNING")
             self.markdown_content = citation_parser.add_missing_citations(missing)
+            self.report.validation_results.citations_added = len(missing)
         
         # Normalizar múltiplas citações
         self.markdown_content = citation_parser.normalize_multiple_citations()
@@ -219,6 +306,9 @@ class CorretorABNT:
         formatter = ReferenceFormatter(self.references)
         formatted_refs = formatter.format_all()
         
+        # Registrar ordenação no relatório
+        self.report.validation_results.references_sorted = len(formatted_refs)
+        
         # Substituir seção de referências antiga pela nova
         ref_pattern = r'((?:^|\n)(?:#{1,3}\s*)?(?:REFERÊNCIAS|Referências)).*'
         new_section = formatter.generate_references_section(formatted_refs)
@@ -245,13 +335,20 @@ class CorretorABNT:
         results = verifier.batch_verify_references(references_list)
         
         accessible = sum(1 for r in results if r['all_accessible'])
+        self.report.validation_results.links_verified = len(results)
+        
         self._log(f"✓ {accessible}/{len(results)} links acessíveis", "SUCCESS")
         
         # Atualizar datas de acesso
+        updated_count = 0
         for key, ref in self.references.items():
             if ref['has_url']:
                 updated_entry = verifier.update_access_date(ref['full_entry'])
+                if updated_entry != ref['full_entry']:
+                    updated_count += 1
                 self.references[key]['full_entry'] = updated_entry
+        
+        self.report.validation_results.links_updated = updated_count
     
     def export_docx(self) -> None:
         """
@@ -285,6 +382,64 @@ class CorretorABNT:
         self.statistics = stats
         return stats
     
+    def validate_document_before(self) -> None:
+        """Valida documento antes do processamento"""
+        self._log("Validando documento original...", "PROCESS")
+        self.validator_before = ABNTValidator(self.markdown_content)
+        issues_before = self.validator_before.validate_all()
+        
+        # Registrar estatísticas iniciais
+        stats_before = self.validator_before.get_statistics()
+        self.report.statistics_before = {
+            'palavras': stats_before['palavras'],
+            'caracteres': stats_before['caracteres'],
+            'citacoes': stats_before['total_citacoes'],
+            'referencias': stats_before['total_referencias']
+        }
+        
+        if issues_before:
+            self._log(f"Encontrados {len(issues_before)} problemas a corrigir", "INFO")
+    
+    def validate_document_after(self) -> None:
+        """Valida documento após o processamento"""
+        self._log("Validando documento corrigido...", "PROCESS")
+        self.validator_after = ABNTValidator(self.markdown_content)
+        issues_after = self.validator_after.validate_all()
+        
+        # Registrar estatísticas finais
+        stats_after = self.validator_after.get_statistics()
+        self.report.statistics_after = {
+            'palavras': stats_after['palavras'],
+            'caracteres': stats_after['caracteres'],
+            'citacoes': stats_after['total_citacoes'],
+            'referencias': stats_after['total_referencias']
+        }
+        
+        # Registrar avisos e erros remanescentes
+        for issue in issues_after:
+            if issue.severity == 'error':
+                self.report.validation_results.errors.append(issue.message)
+            elif issue.severity == 'warning':
+                self.report.validation_results.warnings.append(issue.message)
+        
+        if issues_after:
+            self._log(f"Restam {len(issues_after)} problemas", "WARNING")
+        else:
+            self._log("Documento 100% conforme ABNT", "SUCCESS")
+    
+    def generate_final_report(self) -> None:
+        """Gera relatório final de alterações"""
+        self._log("Gerando relatório de alterações...", "PROCESS")
+        
+        # Salvar relatório Markdown
+        report_path = self.output_file.parent / f"{self.output_file.stem}_RELATORIO.md"
+        self.report.save_report(str(report_path), format="markdown")
+        
+        # Exibir relatório em texto no console
+        print(self.report.generate_text_report())
+        
+        self._log(f"Relatório salvo em: {report_path}", "SUCCESS")
+    
     def processar_documento(self) -> Dict:
         """
         Pipeline completo de processamento
@@ -300,24 +455,36 @@ class CorretorABNT:
             # Etapa 1: Extração
             self.extract_document()
             
-            # Etapa 2: Extrair referências
+            # Etapa 1.5: Validação inicial
+            self.validate_document_before()
+            
+            # ETAPA 2: CONVERSÃO DE LINKS PARA CITAÇÕES (PRIORIDADE MÁXIMA)
+            self.convert_links_to_citations()
+            
+            # Etapa 3: Extrair referências
             self.extract_references()
             
-            # Etapa 3: Processar citações
+            # Etapa 4: Processar citações
             self.process_citations()
             
-            # Etapa 4: Formatar referências
+            # Etapa 5: Formatar referências
             self.format_references()
             
             # Etapa 5: Verificar links (opcional)
             if self.verify_links:
                 self.verify_and_update_links()
             
-            # Etapa 6: Exportar para DOCX
+            # Etapa 6: Validação final
+            self.validate_document_after()
+            
+            # Etapa 7: Exportar para DOCX
             self.export_docx()
             
             # Gerar estatísticas
             stats = self.generate_statistics()
+            
+            # Etapa 8: Gerar relatório de alterações
+            self.generate_final_report()
             
             # Exibir resumo
             self._log("="*60, "INFO")

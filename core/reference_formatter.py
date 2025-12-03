@@ -43,6 +43,7 @@ class ReferenceFormatter:
     def format_reference(self, ref: Dict) -> str:
         """
         Formata uma referência individual conforme ABNT
+        MODO CONSERVADOR: Preserva conteúdo original, apenas ajusta detalhes
         
         Args:
             ref: Dict com dados da referência
@@ -50,35 +51,27 @@ class ReferenceFormatter:
         Returns:
             Referência formatada
         """
-        # Autor em MAIÚSCULAS
-        author = ref.get('full_author', '').upper()
+        # PRESERVAR entrada original
+        entry = ref.get('full_entry', '')
         
-        # Ano
-        year = ref.get('year', '')
-        
-        # Extrair e formatar título (primeira sentença após o ano)
-        full_entry = ref.get('full_entry', '')
-        title = self._extract_title(full_entry, year)
-        
-        # Construir referência base
-        parts = [f"**{author}.**"]
-        
-        if title:
-            parts.append(f"**{title}**")
-        
-        parts.append(f"{year}.")
-        
-        # Adicionar demais informações
-        remaining = self._extract_remaining_info(full_entry, author, year, title)
-        if remaining:
-            parts.append(remaining)
-        
-        # Adicionar URL e data de acesso se existir
+        # Apenas atualizar data de acesso se tiver URL
         if ref.get('has_url') and ref.get('url'):
-            url_part = self._format_url_and_access(ref)
-            parts.append(url_part)
+            current_date = datetime.now().strftime("%d %b. %Y")
+            
+            # Se já tem data de acesso, atualizar
+            if ref.get('access_date'):
+                entry = re.sub(
+                    r'Acesso em:\s*\d{1,2}\s+\w+\.?\s+\d{4}',
+                    f'Acesso em: {current_date}',
+                    entry
+                )
+            # Se tem URL mas não tem data de acesso, adicionar
+            elif 'Disponível em:' in entry or 'http' in entry:
+                if not entry.endswith('.'):
+                    entry += '.'
+                entry += f' Acesso em: {current_date}.'
         
-        return ' '.join(parts)
+        return entry
     
     def _extract_title(self, full_entry: str, year: str) -> str:
         """Extrai título da referência"""
